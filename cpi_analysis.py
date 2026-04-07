@@ -21,7 +21,8 @@ MONTH_ORDER = ['January','February','March','April','May','June',
                'July','August','September','October','November','December']
 MONTH_MAP = {m: i+1 for i, m in enumerate(MONTH_ORDER)}
 
-# Fix typo in data: 'Marcrh' -> 'March'
+# Fix typos in data: 'Marcrh' -> 'March', strip whitespace from Month
+df['Month'] = df['Month'].str.strip()
 df['Month'] = df['Month'].replace({'Marcrh': 'March'})
 df['Month_Num'] = df['Month'].map(MONTH_MAP)
 df['Year'] = df['Year'].astype(int)
@@ -34,13 +35,24 @@ META_COLS = ['Sector','Year','Month','Month_Num']
 COMPOSITE_COLS = ['Food and beverages','Clothing and footwear','Miscellaneous','General index']
 CATEGORY_COLS = [c for c in df.columns if c not in META_COLS + COMPOSITE_COLS]
 
-# Replace 'NA' string with NaN and convert to numeric
+# Replace 'NA' string and '-' with NaN and convert to numeric
 for col in CATEGORY_COLS + COMPOSITE_COLS:
+    df[col] = df[col].replace({'-': np.nan, 'NA': np.nan})
     df[col] = pd.to_numeric(df[col], errors='coerce')
 
 # Impute missing values with forward-fill then backward-fill within each sector
 for col in CATEGORY_COLS + COMPOSITE_COLS:
     df[col] = df.groupby('Sector')[col].transform(lambda s: s.ffill().bfill())
+
+# For columns where an entire sector group is NaN (e.g. Housing for Rural),
+# fill from the Rural+Urban values as a proxy
+for col in CATEGORY_COLS + COMPOSITE_COLS:
+    if df[col].isna().any():
+        rural_urban_vals = df.loc[df['Sector'] == 'Rural+Urban', ['Year','Month_Num', col]].copy()
+        rural_urban_vals = rural_urban_vals.rename(columns={col: f'{col}_proxy'})
+        df = df.merge(rural_urban_vals, on=['Year','Month_Num'], how='left')
+        df[col] = df[col].fillna(df[f'{col}_proxy'])
+        df = df.drop(columns=[f'{col}_proxy'])
 
 # ─── Define Broader Categories ───────────────────────────────────────
 BROADER_CATEGORIES = {
@@ -682,6 +694,54 @@ ws0.column_dimensions['A'].width = 30
 ws0.column_dimensions['B'].width = 30
 ws0.column_dimensions['C'].width = 30
 ws0.column_dimensions['D'].width = 30
+
+# ======================================================================
+# SHEET: Raw Data (Cleaned) – Full cleaned dataset
+# ======================================================================
+ws_raw = wb.create_sheet("Raw Data (Cleaned)")
+
+ws_raw.cell(row=1, column=1, value="Raw Data (Cleaned) – All Cleaning Applied")
+ws_raw.cell(row=1, column=1).font = Font(bold=True, size=14)
+ws_raw.merge_cells(start_row=1, start_column=1, end_row=1, end_column=6)
+
+# Define columns for raw data output (exclude helper column Month_Num)
+RAW_DATA_COLS = [c for c in df.columns if c != 'Month_Num']
+
+# Cleaning notes
+cleaning_notes = [
+    "Cleaning steps applied:",
+    "1. Month typo fixed: 'Marcrh' → 'March', 'November ' (trailing space) → 'November'",
+    "2. All 'NA' string values converted to numeric and imputed using forward-fill then back-fill within each Sector group",
+    "3. Housing column: Rural sector had no Housing CPI data – imputed using Rural+Urban values as proxy",
+    "4. Data sorted by Sector, Year, Month (chronological order)",
+    f"5. Total rows: {len(df)} | Total columns: {len(RAW_DATA_COLS)}",
+]
+for i, note in enumerate(cleaning_notes):
+    ws_raw.cell(row=3 + i, column=1, value=note)
+    ws_raw.cell(row=3 + i, column=1).font = Font(italic=True, size=10)
+    ws_raw.merge_cells(start_row=3+i, start_column=1, end_row=3+i, end_column=8)
+
+# Write column headers
+header_row = 3 + len(cleaning_notes) + 1
+for col_idx, col_name in enumerate(RAW_DATA_COLS, 1):
+    ws_raw.cell(row=header_row, column=col_idx, value=col_name)
+style_header(ws_raw, header_row, len(RAW_DATA_COLS))
+
+# Write data rows
+for row_idx, (_, data_row) in enumerate(df.iterrows()):
+    excel_row = header_row + 1 + row_idx
+    for col_idx, col_name in enumerate(RAW_DATA_COLS, 1):
+        val = data_row[col_name]
+        if pd.notna(val):
+            ws_raw.cell(row=excel_row, column=col_idx, value=val)
+        else:
+            ws_raw.cell(row=excel_row, column=col_idx, value="")
+
+last_data_row = header_row + len(df)
+style_data_area(ws_raw, header_row + 1, last_data_row, len(RAW_DATA_COLS))
+auto_width(ws_raw, len(RAW_DATA_COLS), last_data_row)
+
+print(f"✅ Raw Data sheet: {len(df)} rows x {len(RAW_DATA_COLS)} cols written")
 
 # ─── Save ─────────────────────────────────────────────────────────────
 OUTPUT_PATH = "India_CPI_Inflation_Case_Study.xlsx"
